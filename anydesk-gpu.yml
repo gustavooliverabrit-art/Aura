@@ -1,0 +1,94 @@
+name: Windows Cloud PC - RTX 5080 Simulation
+
+on:
+  workflow_dispatch:
+    inputs:
+      anydesk_id:
+        description: 'AnyDesk ID Fixo (opcional)'
+        required: false
+        default: ''
+
+env:
+  ANYDESK_VERSION: "9.2.5"
+  # Usando link genérico que sempre aponta para a última versão estável
+  ANYDESK_URL: "https://download.anydesk.com/AnyDesk_9.2.5_Windows.zip" 
+  ANYDESK_DIR: "${{ github.workspace }}/anydesk"
+  ANYDESK_EXE: "${{ github.workspace }}/anydesk/AnyDesk.exe"
+  
+jobs:
+  build:
+    name: GPU Optimized Daemon
+    runs-on: windows-latest
+    timeout-minutes: 10080
+    
+    steps:
+      - name: 📥 Baixar AnyDesk
+        run: |
+          Write-Host "Baixando AnyDesk..."
+          $tempDir = Join-Path $env:TEMP "AnyDesk_Download"
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          
+          $zipPath = Join-Path $tempDir "AnyDesk.zip"
+          try {
+              Invoke-WebRequest -Uri "https://anydesk.com/en/downloads/latest/windows-portable" -OutFile $zipPath -UseBasicParsing
+          } catch {
+              Write-Warning "Falha no link principal, tentando backup..."
+              Invoke-WebRequest -Uri "https://download.anydesk.com/AnyDesk_9.2.5_Windows.zip" -OutFile $zipPath -UseBasicParsing
+          }
+          
+          Expand-Archive -Path $zipPath -DestinationPath "${{ env.ANYDESK_DIR }}" -Force
+          Remove-Item $zipPath -Force
+          Remove-Item $tempDir -Recurse -Force
+
+      - name: ⚡ Configurar Hardware Acceleration
+        run: |
+          $dir = "${{ env.ANYDESK_DIR }}"
+          $exe = "${{ env.ANYDESK_EXE }}"
+          
+          # Pasta obrigatória
+          New-Item -ItemType Directory -Force -Path "$dir\data" | Out-Null
+          
+          # Força Aceleração por Hardware (Simulando RTX)
+          $configContent = @"
+hw_accel=1
+vulkan_support=1
+rendering_mode=directx
+"@
+          Set-Content -Path "$dir\user.conf" -Value $configContent -Encoding ascii
+          
+          if ("${{ github.event.inputs.anydesk_id }}" -ne "") {
+              Add-Content -Path "$dir\user.conf" -Value "id=${{ github.event.inputs.anydesk_id }}"
+              Write-Host "ID Fixo aplicado."
+          }
+
+      - name: 🚀 Iniciar Daemon (High Priority)
+        run: |
+          $exe = "${{ env.ANYDESK_EXE }}"
+          Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue | Stop-Process -Force
+          
+          Start-Process cmd.exe -ArgumentList "/c", "`"$exe`" --daemon" -WindowStyle Hidden
+          
+          Write-Host "Aguardando estabilização..."
+          Start-Sleep -Seconds 30
+          
+          $pid = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+          if ($pid) {
+              Write-Host "✅ Daemon Rodando (PID: $($pid.Id))"
+              # Tenta elevar prioridade
+              try { $pid.PriorityClass = "High" } catch {}
+          } else {
+              Write-Error "❌ Falha ao iniciar."
+              exit 1
+          }
+
+      - name: 🔄 Monitoramento
+        run: |
+          while ($true) {
+              $p = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+              if (-not $p -or $p.HasExited) {
+                  Write-Host "⚠️ Reiniciando..."
+                  Start-Process cmd.exe -ArgumentList "/c", "`"${{ env.ANYDESK_EXE }}`" --daemon" -WindowStyle Hidden
+                  Start-Sleep -Seconds 20
+              }
+              Start-Sleep -Seconds 60
+          }
