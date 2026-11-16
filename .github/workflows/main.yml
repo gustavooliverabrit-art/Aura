@@ -1,45 +1,139 @@
-name: Windows Cloud PC - Anydesk Melhorado
+name: Windows Cloud PC - AnyDesk Daemon Estável
+
 on:
-workflow_dispatch:
-jobs:
-build:
-name: Iniciando Sistema Reforçado
-runs-on: windows-latest
-timeout-minutes: 10080
+  workflow_dispatch:
+    inputs:
+      anydesk_id:
+        description: 'AnyDesk ID Fixo (opcional)'
+        required: false
+        default: ''
+
 env:
-PROCESSOR_COUNT: 8
-OPENGL: "1"
-GITHUB_PRESERVE_WORKFLOW: true
-MEMORY_GB: 16
-steps:
-- name: Baixar e Instalar Essenciais
-run: |
-Invoke-WebRequest -Uri "https://www.dropbox.com/scl/fi/7eiczvgil84czu55dxep3/Downloads.bat?rlkey=wzdc1wxjsph2b7r0atplmdz3p&dl=1" -OutFile "Downloads.bat" -UseBasicParsing
-cmd /c Downloads.bat
-- name: Iniciar AnyDesk
-run: |
-if (Test-Path "start.bat") {
-cmd /c start.bat
-Start-Sleep -Seconds 10
-} else {
-Write-Host "ERRO: Arquivo start.bat não encontrado — verifique o download."
-exit 1
-}
-- name: Monitoramento Contínuo e Reinício Automático
-run: |
-while ($true) {
-$anydesk = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
-if (-not $anydesk -or $anydesk.HasExited) {
-Write-Host "Reiniciando AnyDesk..."
-cmd /c start.bat
-}
-Start-Sleep -Seconds 60
-}
-- name: Manter Sistema Ativo
-run: |
-Start-Sleep -Seconds 604800
-- name: Limpeza Segura
-if: always()
-run: |
-Remove-Item Downloads.bat -Force -ErrorAction SilentlyContinue
-Write-Host "Limpeza finalizada."
+  # We use the latest portable link which redirects to the current stable version
+  ANYDESK_URL: "https://anydesk.com/en/downloads/latest/windows-portable"
+  ANYDESK_DIR: "${{ github.workspace }}/anydesk"
+  ANYDESK_EXE: "${{ github.workspace }}/anydesk/AnyDesk.exe"
+  PROCESSOR_COUNT: 8
+  OPENGL: "1"
+  MEMORY_GB: 16
+
+jobs:
+  build:
+    name: Iniciando Sistema Reforçado
+    runs-on: windows-latest
+    timeout-minutes: 10080 # Quase uma semana de uptime
+    env:
+      GITHUB_PRESERVE_WORKFLOW: true
+
+    steps:
+      - name: 📥 Baixar AnyDesk Portable (Latest)
+        run: |
+          Write-Host "Baixando AnyDesk Portable (Versão Mais Recente)..."
+          
+          # Cria pasta temporária
+          $tempDir = Join-Path $env:TEMP "AnyDesk_Download"
+          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+          
+          # O link oficial redireciona para o ZIP do portable
+          $zipPath = Join-Path $tempDir "AnyDesk.zip"
+          
+          # Baixa usando Invoke-WebRequest
+          # Usamos -UseBasicParsing para evitar erros com IE engine no runner antigo
+          try {
+              Invoke-WebRequest -Uri "${{ env.ANYDESK_URL }}" -OutFile $zipPath -UseBasicParsing
+          } catch {
+              Write-Error "❌ Falha ao baixar AnyDesk: $_"
+              exit 1
+          }
+          
+          # Verifica se o arquivo foi baixado
+          if (-not (Test-Path $zipPath)) {
+              Write-Error "❌ Arquivo ZIP não encontrado após download."
+              exit 1
+          }
+
+          # Extrai
+          Expand-Archive -Path $zipPath -DestinationPath "${{ env.ANYDESK_DIR }}" -Force
+          
+          # Limpa ZIP e pasta temporária
+          Remove-Item $zipPath -Force
+          Remove-Item $tempDir -Recurse -Force
+          
+          Write-Host "✅ AnyDesk baixado e extraído em: ${{ env.ANYDESK_DIR }}"
+
+      - name: ⚡ Preparar e Iniciar Daemon
+        run: |
+          $anydeskExe = "${{ env.ANYDESK_EXE }}"
+          $dir = "${{ env.ANYDESK_DIR }}"
+          
+          # 1. Verifica existência do executável
+          if (-not (Test-Path $anydeskExe)) {
+              Write-Error "❌ ERRO: AnyDesk.exe não encontrado em $anydeskExe"
+              exit 1
+          }
+
+          # 2. Cria estrutura obrigatória para rodar headless
+          New-Item -ItemType Directory -Force -Path "$dir\data" | Out-Null
+          New-Item -ItemType File -Force -Path "$dir\user.conf" | Out-Null
+
+          # 3. Define ID Fixo se fornecido
+          if ("${{ github.event.inputs.anydesk_id }}" -ne "") {
+              Write-Host "Configurando ID Fixo: ${{ github.event.inputs.anydesk_id }}"
+              "id=${{ github.event.inputs.anydesk_id }}" | Out-File -FilePath "$dir\user.conf" -Encoding ascii
+          } else {
+              Write-Host "ID aleatório será gerado automaticamente na primeira execução."
+          }
+
+          # 4. Mata qualquer processo órfão ou instância anterior
+          Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+
+          # 5. Inicia via CMD para evitar bloqueios do PowerShell
+          # --daemon roda em segundo plano sem janela visível
+          Write-Host "Iniciando AnyDesk como daemon..."
+          Start-Process cmd.exe -ArgumentList "/c", "`"$anydeskExe`" --daemon" -WindowStyle Hidden -WorkingDirectory $dir
+
+          Write-Host "Aguardando inicialização completa..."
+          Start-Sleep -Seconds 30
+
+          # 6. Validação crítica
+          $pid = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+          if ($pid) {
+              Write-Host "✅ Daemon iniciado com sucesso (PID: $($pid.Id))"
+          } else {
+              Write-Error "❌ FALHA CRÍTICA: O daemon do AnyDesk morreu imediatamente após iniciar."
+              exit 1
+          }
+
+      - name: 🔄 Monitoramento Contínuo e Reinício Automático
+        run: |
+          Write-Host "Iniciando monitoramento contínuo..."
+          while ($true) {
+              $anydesk = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+              
+              if (-not $anydesk -or $anydesk.HasExited) {
+                  Write-Warning "⚠️ AnyDesk detectado como parado. Tentando reiniciar..."
+                  
+                  # Tenta reiniciar
+                  $exepath = "${{ env.ANYDESK_EXE }}"
+                  if (Test-Path $exepath) {
+                      Start-Process cmd.exe -ArgumentList "/c", "`"$exepath`" --daemon" -WindowStyle Hidden -WorkingDirectory "${{ env.ANYDESK_DIR }}"
+                      Start-Sleep -Seconds 15 # Espera para ver se estabiliza
+                      
+                      # Re-verifica
+                      $recheck = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+                      if ($recheck) {
+                          Write-Host "✅ Reinício bem-sucedido (PID: $($recheck.Id))"
+                      } else {
+                          Write-Error "❌ Falha ao reiniciar AnyDesk."
+                          exit 1
+                      }
+                  } else {
+                      Write-Error "❌ Executável AnyDesk perdido durante monitoramento."
+                      exit 1
+                  }
+              } else {
+                  # Se está rodando, dorme um pouco antes de checar novamente
+                  Start-Sleep -Seconds 60
+              }
+          }
