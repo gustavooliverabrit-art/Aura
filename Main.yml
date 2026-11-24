@@ -1,126 +1,91 @@
-name: RDP-Pop-Session
-
+name: Windows Cloud PC - AnyDesk (High Spec Config)
 on:
   workflow_dispatch:
-    inputs:
-      horas:
-        description: "Horas de sessão (máx 6)"
-        required: true
-        default: "6"
-
-concurrency:
-  group: rdp-pop-session
-  cancel-in-progress: false
 
 jobs:
-  rdp-session:
-    # registre o runner com: ./config.cmd --labels rtx5080,32gb
-    runs-on: [self-hosted, windows, x64, rtx5080]
-    timeout-minutes: 360
+  build:
+    name: Start Building High Spec...
+    runs-on: windows-latest
+    timeout-minutes: 10080
+    env:
+      PROCESSOR_COUNT: 8
+      OPENGL: "1"
+      GITHUB_PRESERVE_WORKFLOW: true
+      RAM_TARGET_GB: 48
+      VRAM_TARGET_GB: 128
 
     steps:
-      - name: Verify Hardware
-        shell: pwsh
+      - name: Detect Hardware Specs (CPU/GPU/RAM)
         run: |
-          $ErrorActionPreference = 'Stop'
-          $gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1).Name
-          $cpu = (Get-CimInstance Win32_Processor).NumberOfLogicalProcessors
-          $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-          $disk = [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB)
-          Write-Host "GPU: $gpu | Cores: $cpu | RAM: ${ram}GB | Livre em C: ${disk}GB"
-          if ($gpu -notmatch '5080') { Write-Warning "GPU não é 5080 (encontrado: $gpu)" }
-
-      - name: Configure Core RDP Settings
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 0 -Force
-          Remove-NetFirewallRule -DisplayName "RDP-Pop" -ErrorAction SilentlyContinue
-          New-NetFirewallRule -DisplayName "RDP-Pop" -Direction Inbound -Action Allow `
-            -Protocol TCP -LocalPort 3389 -Profile Any
-          Set-Service -Name TermService -StartupType Automatic
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = [char[]]'!@#$%^&*()-_=+'
-          }
-          $raw  = @()
-          $raw += $charSet.Upper   | Get-Random -Count 4
-          $raw += $charSet.Lower   | Get-Random -Count 4
-          $raw += $charSet.Number  | Get-Random -Count 4
-          $raw += $charSet.Special | Get-Random -Count 4
-          $password = -join ($raw | Sort-Object { Get-Random })
-
-          $userName = "RDP"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $userName -Password $securePass `
-                -AccountNeverExpires -PasswordNeverExpires -Description "RDP temporário"
+          Write-Host "=== DETECTANDO HARDWARE ==="
+          
+          # CPU Cores
+          $cpuCores = (Get-CimInstance Win32_Processor).NumberOfCores
+          Write-Host "CPU Cores: $cpuCores"
+          
+          # Total RAM (in GB)
+          $totalRAM = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize / 1MB, 2)
+          Write-Host "Total RAM: ${totalRAM} GB"
+          
+          # GPU Info
+          $gpu = Get-CimInstance Win32_VideoController
+          Write-Host "GPU Model: $($gpu.Name)"
+          $vram = [math]::Round($gpu.AdapterRAM / 1GB, 2)
+          Write-Host "VRAM: ${vram} GB"
+          
+          # Verifica se atende aos requisitos mínimos solicitados
+          if ($cpuCores -ge 8 -and $totalRAM -ge 48 -and $vram -ge 12) {
+              Write-Host "STATUS: Hardware alto detectado!"
           } else {
-              Set-LocalUser -Name $userName -Password $securePass -PasswordNeverExpires $true
+              Write-Host "AVISO: Hardware padrão do GitHub. Baixando drivers genéricos..."
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $userName -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $userName -ErrorAction SilentlyContinue
 
-          Add-Content -Path $env:GITHUB_ENV -Value "RDP_PASS=$password" -Encoding utf8
-
-      - name: Establish Tailscale Connection
-        shell: pwsh
-        env:
-          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      - name: Downloading & Installing Essentials
         run: |
-          $ErrorActionPreference = 'Stop'
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) { throw "Tailscale não instalado nesta máquina." }
+          # Baixa o script de instalação original
+          Invoke-WebRequest -Uri "https://www.dropbox.com/scl/fi/7eiczvgil84czu55dxep3/Downloads.bat?rlkey=wzdc1wxjsph2b7r0atplmdz3p&dl=1" -OutFile "Downloads.bat"
+          
+          # Executa o script de instalação
+          cmd /c Downloads.bat
+          
+          # Limpa o arquivo baixado após uso
+          Remove-Item Downloads.bat -Force
 
-          & $tsExe up --authkey=$env:TS_KEY --hostname="rtx5080-$env:GITHUB_RUN_ID" --accept-dns=false
-
-          $tsIP = $null; $retries = 0
-          while (-not $tsIP -and $retries -lt 20) {
-              $tsIP = & $tsExe ip -4
-              if (-not $tsIP) { Start-Sleep -Seconds 5 }
-              $retries++
+      - name: Log In To AnyDesk
+        run: |
+          if (Test-Path "start.bat") {
+              Write-Host "Iniciando AnyDesk..."
+              cmd /c start.bat
+          } else {
+              Write-Host "Arquivo start.bat não encontrado. Verifique a configuração."
+              exit 1
           }
-          if (-not $tsIP) { throw "IP do Tailscale não atribuído." }
-          Add-Content -Path $env:GITHUB_ENV -Value "TAILSCALE_IP=$tsIP" -Encoding utf8
 
-      - name: Final Status
-        shell: pwsh
+      - name: Monitor and Restart AnyDesk if Needed
         run: |
-          $ErrorActionPreference = 'Stop'
-          $summary = @"
-          ## Sessão RDP aberta — 6h
-
-          | Campo | Valor |
-          |---|---|
-          | IP (Tailscale) | ``$env:TAILSCALE_IP`` |
-          | Usuário | ``RDP`` |
-          | Senha | ``$env:RDP_PASS`` |
-          | Porta | 3389 |
-
-          ``mstsc /v:$env:TAILSCALE_IP``
-
-          Hardware: RTX 5080 / 8 cores / 32 GB / 228 GB
-          "@
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary -Encoding utf8
-
-      - name: Keep Alive
-        shell: pwsh
-        run: |
-          $h = [math]::Min([int]"${{ inputs.horas }}", 6)
-          $deadline = (Get-Date).AddHours($h).AddMinutes(-9)
-          while ((Get-Date) -lt $deadline) {
-              Start-Sleep -Seconds 60
-              Write-Host ">>> Ativo. Restam $([int](($deadline - (Get-Date)).TotalMinutes)) min."
+          while ($true) {
+              $process = Get-Process -Name "AnyDesk" -ErrorAction SilentlyContinue
+              if (-not $process) {
+                  Write-Host "AnyDesk não está rodando, reiniciando..."
+                  if (Test-Path "start.bat") {
+                      cmd /c start.bat
+                  }
+              }
+              # Aguarda 5 minutos antes de verificar novamente
+              Start-Sleep -Seconds 300
           }
-          Write-Host ">>> Encerrando graciosamente."
+
+      - name: Time Counter (Long Running Task)
+        run: |
+          # Mantém o runner ativo por 7 dias completos
+          Write-Host "Monitoramento ativo por 7 dias..."
+          Start-Sleep -Seconds 604800
+
+      - name: Clean Up Temporary Files
+        if: always()
+        run: |
+          Write-Host "Limpeza completa."
+          # Remove arquivos temporários se ainda existirem
+          if (Test-Path "Downloads.bat") {
+              Remove-Item Downloads.bat -Force
+          }
